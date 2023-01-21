@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand};
 use std::{collections::HashMap, sync::Mutex};
-
 use tabled::{style::HorizontalLine, Table, Tabled};
 
 #[derive(Parser, Debug)]
@@ -28,10 +27,13 @@ enum Commands {
         #[arg(short, long)]
         direction: String,
 
-        /// Route service type, always `1`
+        /// Route service type
         #[arg(short, long, default_value = "1")]
         service_type: String,
     },
+
+    /// Display all route info. Example `kmb-eta-cli all | fzf`
+    All
 }
 
 #[derive(Tabled, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -304,6 +306,20 @@ async fn search_route_info(route: &str, to_print: bool) -> Result<(), Box<dyn st
     Ok(())
 }
 
+fn search_all_route_info() {
+    let mutex_routes = ROUTES.lock().unwrap();
+
+    let mut table = Table::new(mutex_routes.iter());
+    table.with(
+        tabled::Style::modern()
+            .off_horizontal()
+            .off_top()
+            .off_bottom()
+    );
+
+    println!("{}", table);
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     load_names().await?;
@@ -322,6 +338,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             service_type,
         } => {
             search_route_eta(&route.to_uppercase(), &direction, &service_type).await?;
+        }
+
+        Commands::All => {
+            search_all_route_info();
         }
     }
 
