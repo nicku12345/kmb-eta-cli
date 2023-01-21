@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::{collections::HashMap, sync::Mutex};
 
-use tabled::{object::Rows, style::HorizontalLine, Table};
+use tabled::{style::HorizontalLine, Table, Tabled};
 
 #[derive(Parser, Debug)]
 struct Cli {
@@ -34,8 +34,33 @@ enum Commands {
     },
 }
 
+#[derive(Tabled, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RouteInfo {
+    route: String,
+    service_type: i64,
+    direction: String,
+    orig: String,
+    dest: String,
+}
+
+#[derive(Tabled, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct StopIdName {
+    stop_id: String,
+    stop_name: String,
+}
+
+#[derive(Tabled, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct RouteEtaInfo {
+    seq: String,
+    stop_name: String,
+    t1: String,
+    t2: String,
+    t3: String,
+}
+
 const BASE_URL: &str = "https://data.etabus.gov.hk";
-static STOP_ID_NAMES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+static ROUTES: Mutex<Vec<RouteInfo>> = Mutex::new(Vec::new());
+static STOP_ID_NAMES: Mutex<Vec<StopIdName>> = Mutex::new(Vec::new());
 
 async fn load_names() -> Result<(), Box<dyn std::error::Error>> {
     let api_url = "v1/transport/kmb/stop";
@@ -57,7 +82,10 @@ async fn load_names() -> Result<(), Box<dyn std::error::Error>> {
             let stop_id = data["stop"].as_str().unwrap();
             let name_tc = data["name_tc"].as_str().unwrap();
 
-            mutext_stop_id_names.push((String::from(stop_id), String::from(name_tc)));
+            mutext_stop_id_names.push(StopIdName {
+                stop_id: stop_id.to_string(),
+                stop_name: name_tc.to_string(),
+            })
         });
 
     mutext_stop_id_names.sort();
@@ -144,99 +172,133 @@ async fn search_route_eta(
         });
 
     let mutex_stop_id_names = STOP_ID_NAMES.lock().unwrap();
-    let mut output = vec![
-        ("seq".to_string(), "stop_name", "t1", "t2", "t3")
-    ];
+    let mut output = vec![];
 
     let empty_eta = &"".to_string();
     for (ref_seq, stop_id) in &route_ids {
         let seq = *ref_seq;
-        let idx = match mutex_stop_id_names.binary_search(&(stop_id.to_string(), String::new())) {
+        let query = StopIdName {
+            stop_id: stop_id.to_string(),
+            stop_name: String::new(),
+        };
+
+        let idx = match mutex_stop_id_names.binary_search(&query) {
             Ok(i) => i,
             Err(i) => i,
         };
 
-        let stop_name = &mutex_stop_id_names.get(idx).unwrap().1;
+        let stop_name = &mutex_stop_id_names.get(idx).unwrap().stop_name;
 
         let first_eta = stop_eta.get(&(seq, 1)).unwrap_or(empty_eta);
         let second_eta = stop_eta.get(&(seq, 2)).unwrap_or(empty_eta);
         let third_eta = stop_eta.get(&(seq, 3)).unwrap_or(empty_eta);
 
-        output.push((
-            seq.to_string(),
-            stop_name,
-            first_eta,
-            second_eta,
-            third_eta,
-        ));
+        output.push(RouteEtaInfo {
+            seq: seq.to_string(),
+            stop_name: stop_name.to_string(),
+            t1: first_eta.to_string(),
+            t2: second_eta.to_string(),
+            t3: third_eta.to_string(),
+        })
+        // output.push((seq.to_string(), stop_name, first_eta, second_eta, third_eta));
     }
 
     let mut table = Table::new(output);
-    table
-        .with(
-            tabled::Style::modern()
-                .off_horizontal()
-                .horizontals([HorizontalLine::new(
-                    1,
-                    tabled::Style::modern().get_horizontal(),
-                )]),
-        )
-        .with(tabled::Disable::row(Rows::first()));
+    table.with(
+        tabled::Style::modern()
+            .off_horizontal()
+            .horizontals([HorizontalLine::new(
+                1,
+                tabled::Style::modern().get_horizontal(),
+            )]),
+    );
     println!("{}", table);
 
     Ok(())
 }
 
-async fn get_route(
-    route: &str,
-    direction: &str,
-    service_type: &str,
-) -> Result<(String, String), Box<dyn std::error::Error>> {
+async fn load_routes() -> Result<(), Box<dyn std::error::Error>> {
     let api_url = "v1/transport/kmb/route";
-
-    let req_url = format!(
-        "{}/{}/{}/{}/{}",
-        BASE_URL, api_url, route, direction, service_type
-    );
+    let req_url = format!("{}/{}", BASE_URL, api_url,);
 
     let body = reqwest::get(req_url)
         .await?
         .json::<serde_json::Value>()
         .await?;
 
-    if body["data"].as_object().unwrap().is_empty() {
-        Err("route does not exist")?;
-    }
+    let mut mutex_routes = ROUTES.lock().unwrap();
+    body["data"].as_array().unwrap().iter().for_each(|data| {
+        let route = data["route"].as_str().unwrap();
+        let service_type = data["service_type"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap();
+        let orig_tc = data["orig_tc"].as_str().unwrap();
+        let dest_tc = data["dest_tc"].as_str().unwrap();
+        let bound = match data["bound"].as_str().unwrap() {
+            "O" => "outbound",
+            "I" => "inbound",
+            _ => "",
+        };
 
-    let orig_tc = &body["data"]["orig_tc"].as_str().unwrap();
-    let dest_tc = &body["data"]["dest_tc"].as_str().unwrap();
+        mutex_routes.push(RouteInfo {
+            route: route.to_string(),
+            service_type,
+            direction: bound.to_string(),
+            orig: orig_tc.to_string(),
+            dest: dest_tc.to_string(),
+        })
+    });
 
-    Ok((orig_tc.to_string(), dest_tc.to_string()))
+    mutex_routes.sort();
+    Ok(())
 }
 
 async fn search_route_info(route: &str, to_print: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let (o_orig, o_dest) = get_route(route, "outbound", "1").await?;
-    let (i_orig, i_dest) = get_route(route, "inbound", "1").await?;
+    let mutex_routes = ROUTES.lock().unwrap();
 
-    let output = vec![
-        ("route", "direction", "service_type", "orig", "dest"),
-        (route, "outbound", "1", &o_orig, &o_dest),
-        (route, "inbound", "1", &i_orig, &i_dest),
-    ];
+    let query = RouteInfo {
+        route: route.to_string(),
+        service_type: 0,
+        direction: "".to_string(),
+        orig: "".to_string(),
+        dest: "".to_string(),
+    };
 
-    if !to_print { return Ok(()); }
+    let mut idx = match mutex_routes.binary_search(&query) {
+        Ok(i) => i,
+        Err(i) => i,
+    };
 
-    let mut table = Table::new(output);
-    table
-        .with(
-            tabled::Style::modern()
-                .off_horizontal()
-                .horizontals([HorizontalLine::new(
-                    1,
-                    tabled::Style::modern().get_horizontal(),
-                )]),
-        )
-        .with(tabled::Disable::row(Rows::first()));
+    let mut route_info = vec![];
+    while idx < mutex_routes.len() {
+        let r = mutex_routes.get(idx).unwrap();
+        if r.route != route {
+            break;
+        }
+
+        route_info.push(r.clone());
+        idx += 1;
+    }
+
+    if route_info.is_empty() {
+        Err("route does not exist")?;
+    }
+
+    if !to_print {
+        return Ok(());
+    }
+
+    let mut table = Table::new(route_info);
+    table.with(
+        tabled::Style::modern()
+            .off_horizontal()
+            .horizontals([HorizontalLine::new(
+                1,
+                tabled::Style::modern().get_horizontal(),
+            )]),
+    );
     println!("{}", table);
 
     Ok(())
@@ -245,6 +307,8 @@ async fn search_route_info(route: &str, to_print: bool) -> Result<(), Box<dyn st
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     load_names().await?;
+    load_routes().await?;
+
     let cli = Cli::parse();
 
     match cli.command {
