@@ -1,4 +1,3 @@
-use chrono::NaiveTime;
 use clap::{Parser, Subcommand};
 use lazy_static::lazy_static;
 use std::{collections::HashMap, sync::Mutex, time::Instant};
@@ -110,7 +109,6 @@ async fn load_names() -> Result<(), Box<dyn std::error::Error>> {
                 });
         });
 
-    drop(mutext_stop_id_names);
     Ok(())
 }
 
@@ -156,12 +154,12 @@ async fn search_route_eta(
 
     let mut stop_eta = HashMap::new();
     let parse_timestmap =
-        |timestamp_val: &serde_json::Value| -> Result<NaiveTime, Box<dyn std::error::Error>> {
+        |timestamp_val: &serde_json::Value| -> Result<i64, Box<dyn std::error::Error>> {
             if timestamp_val.is_string() {
                 let timestamp_str = timestamp_val.as_str().unwrap();
                 let rfc3339 = chrono::DateTime::parse_from_rfc3339(timestamp_str);
                 if let Ok(t) = rfc3339 {
-                    return Ok(t.time());
+                    return Ok(t.timestamp());
                 }
             }
             Err(format!(
@@ -195,12 +193,12 @@ async fn search_route_eta(
             let eta_repr = match eta_timestamp {
                 Ok(t) => {
                     let eta_diff = t - api_timestamp;
-                    if eta_diff.num_seconds() > 0 {
+                    if eta_diff > 0 {
                         // spare 3 chars for minutes, 2 chars for seconds
                         format!(
                             "{:>3}m {:>2}s",
-                            eta_diff.num_minutes(),
-                            eta_diff.num_seconds() % 60,
+                            eta_diff / 60,
+                            eta_diff % 60,
                         )
                     } else {
                         "LEAVING".to_string()
