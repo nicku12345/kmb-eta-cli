@@ -553,6 +553,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "lazy_static",
  "reqwest",
  "serde_json",
  "tabled",
