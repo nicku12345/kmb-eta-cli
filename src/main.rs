@@ -1,11 +1,15 @@
+use chrono::NaiveTime;
 use clap::{Parser, Subcommand};
-use std::{collections::HashMap, sync::Mutex};
-use tabled::{style::HorizontalLine, Table, Tabled};
+use std::{collections::HashMap, sync::Mutex, time::Instant};
+use tabled::{locator::ByColumnName, style::HorizontalLine, Alignment, Modify, Table, Tabled};
 
 #[derive(Parser, Debug)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    #[arg(short, long, default_value = "false")]
+    debug: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -136,19 +140,22 @@ async fn search_route_eta(
         .await?;
 
     let mut stop_eta = HashMap::new();
-    let parse_eta_str = |eta_val: &serde_json::Value| -> String {
-        if eta_val.is_string() {
-            let eta_str = eta_val.as_str().unwrap();
-
-            let start_idx = eta_str.find('T');
-            let end_idx = eta_str.find('+');
-
-            if let (Some(i), Some(j)) = (start_idx, end_idx) {
-                return eta_str.get(i + 1..j).unwrap().to_string();
+    let parse_timestmap =
+        |timestamp_val: &serde_json::Value| -> Result<NaiveTime, Box<dyn std::error::Error>> {
+            if timestamp_val.is_string() {
+                let timestamp_str = timestamp_val.as_str().unwrap();
+                let rfc3339 = chrono::DateTime::parse_from_rfc3339(timestamp_str);
+                if let Ok(t) = rfc3339 {
+                    return Ok(t.time());
+                }
             }
-        }
-        "".to_string()
-    };
+            Err(format!(
+                "Failed to parse timestamp string {}",
+                timestamp_val
+            ))?
+        };
+
+    let api_timestamp = parse_timestmap(&body["generated_timestamp"])?;
 
     body["data"]
         .as_array()
@@ -168,9 +175,26 @@ async fn search_route_eta(
 
             let seq = data["seq"].as_i64().unwrap();
             let eta_seq = data["eta_seq"].as_i64().unwrap();
-            let eta = parse_eta_str(&data["eta"]);
+            let eta_timestamp = parse_timestmap(&data["eta"]);
 
-            stop_eta.insert((seq, eta_seq), eta);
+            let eta_repr = match eta_timestamp {
+                Ok(t) => {
+                    let eta_diff = t - api_timestamp;
+                    if eta_diff.num_seconds() > 0 {
+                        // spare 3 chars for minutes, 2 chars for seconds
+                        format!(
+                            "{:>3}m {:>2}s",
+                            eta_diff.num_minutes(),
+                            eta_diff.num_seconds() % 60,
+                        )
+                    } else {
+                        "LEAVING".to_string()
+                    }
+                }
+                Err(_) => "".to_string(),
+            };
+
+            stop_eta.insert((seq, eta_seq), eta_repr);
         });
 
     let mutex_stop_id_names = STOP_ID_NAMES.lock().unwrap();
@@ -206,14 +230,19 @@ async fn search_route_eta(
     }
 
     let mut table = Table::new(output);
-    table.with(
-        tabled::Style::modern()
-            .off_horizontal()
-            .horizontals([HorizontalLine::new(
-                1,
-                tabled::Style::modern().get_horizontal(),
-            )]),
-    );
+    table
+        .with(
+            tabled::Style::modern()
+                .off_horizontal()
+                .horizontals([HorizontalLine::new(
+                    1,
+                    tabled::Style::modern().get_horizontal(),
+                )]),
+        )
+        .with(Modify::new(ByColumnName::new("t1")).with(Alignment::right()))
+        .with(Modify::new(ByColumnName::new("t2")).with(Alignment::right()))
+        .with(Modify::new(ByColumnName::new("t3")).with(Alignment::right()));
+
     println!("{}", table);
 
     Ok(())
@@ -345,6 +374,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     load_names().await?;
     load_routes().await?;
 
+    let start = Instant::now();
+
     match cli.command {
         Commands::Route { route } => {
             search_route_info(&route.to_uppercase(), true, None, None).await?;
@@ -361,6 +392,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::All => {
             search_all_route_info();
         }
+    }
+
+    if cli.debug {
+        println!("time elapsed: {:?}", start.elapsed());
     }
 
     Ok(())
