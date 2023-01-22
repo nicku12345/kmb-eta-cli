@@ -29,11 +29,11 @@ enum Commands {
 
         /// Route service type
         #[arg(short, long, default_value = "1")]
-        service_type: String,
+        service_type: i64,
     },
 
     /// Display all route info. Example `kmb-eta-cli all | fzf`
-    All
+    All,
 }
 
 #[derive(Tabled, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -98,10 +98,10 @@ async fn load_names() -> Result<(), Box<dyn std::error::Error>> {
 async fn search_route_eta(
     route: &str,
     direction: &str,
-    service_type: &str,
+    service_type: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // make sure route exists
-    search_route_info(route, false).await?;
+    search_route_info(route, false, Some(direction), Some(service_type)).await?;
 
     let api_url = "v1/transport/kmb/route-stop";
     let req_url = format!(
@@ -257,7 +257,12 @@ async fn load_routes() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn search_route_info(route: &str, to_print: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn search_route_info(
+    route: &str,
+    to_print: bool,
+    direction: Option<&str>,
+    service_type: Option<i64>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mutex_routes = ROUTES.lock().unwrap();
 
     let query = RouteInfo {
@@ -284,8 +289,21 @@ async fn search_route_info(route: &str, to_print: bool) -> Result<(), Box<dyn st
         idx += 1;
     }
 
+    if let (Some(d), Some(t)) = (direction, service_type) {
+        route_info.retain(|r| r.direction == d && r.service_type == t);
+    }
+
     if route_info.is_empty() {
-        Err("route does not exist")?;
+        let err_msg;
+        if let (Some(d), Some(t)) = (direction, service_type) {
+            err_msg = format!(
+                "(route: {}, direction: {}, service_type: {}) does not exist!",
+                route, d, t
+            );
+        } else {
+            err_msg = format!("(route: {}) does not exist!", route);
+        }
+        Err(err_msg)?;
     }
 
     if !to_print {
@@ -314,7 +332,7 @@ fn search_all_route_info() {
         tabled::Style::modern()
             .off_horizontal()
             .off_top()
-            .off_bottom()
+            .off_bottom(),
     );
 
     println!("{}", table);
@@ -322,14 +340,14 @@ fn search_all_route_info() {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+
     load_names().await?;
     load_routes().await?;
 
-    let cli = Cli::parse();
-
     match cli.command {
         Commands::Route { route } => {
-            search_route_info(&route.to_uppercase(), true).await?;
+            search_route_info(&route.to_uppercase(), true, None, None).await?;
         }
 
         Commands::Eta {
@@ -337,7 +355,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             direction,
             service_type,
         } => {
-            search_route_eta(&route.to_uppercase(), &direction, &service_type).await?;
+            search_route_eta(&route.to_uppercase(), &direction, service_type).await?;
         }
 
         Commands::All => {
