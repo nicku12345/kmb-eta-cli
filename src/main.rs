@@ -8,7 +8,7 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    #[arg(short, long, default_value = "false")]
+    #[arg(short, long)]
     debug: bool,
 }
 
@@ -27,9 +27,15 @@ enum Commands {
         #[arg(short, long)]
         route: String,
 
-        /// Route direction, either `inbound` or `outbound`
+        /// To query the inbound route.
+        /// Exactly one of `inbound` or `outbound` is to be set `true`
         #[arg(short, long)]
-        direction: String,
+        inbound: bool,
+
+        /// To query the outbound route.
+        /// Exactly one of `inbound` or `outbound` is to be set `true`
+        #[arg(short, long)]
+        outbound: bool,
 
         /// Route service type
         #[arg(short, long, default_value = "1")]
@@ -40,7 +46,7 @@ enum Commands {
     All,
 }
 
-#[derive(Tabled, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Tabled, Clone)]
 struct RouteInfo {
     route: String,
     service_type: i64,
@@ -49,13 +55,13 @@ struct RouteInfo {
     dest: String,
 }
 
-#[derive(Tabled, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Tabled, Clone)]
 struct StopIdName {
     stop_id: String,
     stop_name: String,
 }
 
-#[derive(Tabled, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Tabled, Clone)]
 struct RouteEtaInfo {
     seq: String,
     stop_name: String,
@@ -86,11 +92,10 @@ lazy_static!(
 );
 
 async fn load_names() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let api_url = HKGovAPI::STOP_URL;
+    let req_url = format!("{}/{}", HKGovAPI::BASE_URL, HKGovAPI::STOP_URL);
 
-    let req_url = format!("{}/{}", HKGovAPI::BASE_URL, api_url);
-
-    let body = REQWEST_CLIENT.get(req_url)
+    let body = REQWEST_CLIENT
+        .get(req_url)
         .send()
         .await?
         .json::<serde_json::Value>()
@@ -110,8 +115,9 @@ async fn load_names() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 stop_id.to_string(),
                 StopIdName {
                     stop_id: stop_id.to_string(),
-                    stop_name: name_tc.to_string()
-                });
+                    stop_name: name_tc.to_string(),
+                },
+            );
         });
 
     Ok(())
@@ -129,13 +135,17 @@ async fn search_route_eta(
     let t_direction = direction.to_string();
     let t_service_type = service_type;
     let task_route_ids = tokio::spawn(async move {
-        let api_url = HKGovAPI::ROUTE_STOP_URL;
         let req_url = format!(
             "{}/{}/{}/{}/{}",
-            HKGovAPI::BASE_URL, api_url, t_route, t_direction, t_service_type
+            HKGovAPI::BASE_URL,
+            HKGovAPI::ROUTE_STOP_URL,
+            t_route,
+            t_direction,
+            t_service_type
         );
 
-        let body = REQWEST_CLIENT.get(req_url)
+        let body = REQWEST_CLIENT
+            .get(req_url)
             .send()
             .await?
             .json::<serde_json::Value>()
@@ -147,10 +157,16 @@ async fn search_route_eta(
     let t_route = route.to_string();
     let t_service_type = service_type;
     let task_stop_eta = tokio::spawn(async move {
-        let api_url = HKGovAPI::ROUTE_ETA_URL;
-        let req_url = format!("{}/{}/{}/{}", HKGovAPI::BASE_URL, api_url, t_route, t_service_type);
+        let req_url = format!(
+            "{}/{}/{}/{}",
+            HKGovAPI::BASE_URL,
+            HKGovAPI::ROUTE_ETA_URL,
+            t_route,
+            t_service_type
+        );
 
-        let body = REQWEST_CLIENT.get(req_url)
+        let body = REQWEST_CLIENT
+            .get(req_url)
             .send()
             .await?
             .json::<serde_json::Value>()
@@ -162,18 +178,17 @@ async fn search_route_eta(
     let body_route_ids = task_route_ids.await?.unwrap();
     let body_stop_eta = task_stop_eta.await?.unwrap();
 
-    let route_ids =
-        body_route_ids["data"]
-            .as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .fold(vec![], |mut cur, data| {
-                let seq = data["seq"].as_str().unwrap().parse::<i64>().unwrap();
-                let stop_id = data["stop"].as_str().unwrap();
+    let route_ids = body_route_ids["data"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .fold(vec![], |mut cur, data| {
+            let seq = data["seq"].as_str().unwrap().parse::<i64>().unwrap();
+            let stop_id = data["stop"].as_str().unwrap();
 
-                cur.push((seq, String::from(stop_id)));
-                cur
-            });
+            cur.push((seq, String::from(stop_id)));
+            cur
+        });
 
     let mut stop_eta = HashMap::new();
     let parse_timestmap =
@@ -218,11 +233,7 @@ async fn search_route_eta(
                     let eta_diff = t - api_timestamp;
                     if eta_diff > 0 {
                         // spare 3 chars for minutes, 2 chars for seconds
-                        format!(
-                            "{:>3}m {:>2}s",
-                            eta_diff / 60,
-                            eta_diff % 60,
-                        )
+                        format!("{:>3}m {:>2}s", eta_diff / 60, eta_diff % 60,)
                     } else {
                         "LEAVING".to_string()
                     }
@@ -276,10 +287,10 @@ async fn search_route_eta(
 }
 
 async fn load_routes() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let api_url = HKGovAPI::ROUTE_URL;
-    let req_url = format!("{}/{}", HKGovAPI::BASE_URL, api_url,);
+    let req_url = format!("{}/{}", HKGovAPI::BASE_URL, HKGovAPI::ROUTE_URL,);
 
-    let body = REQWEST_CLIENT.get(req_url)
+    let body = REQWEST_CLIENT
+        .get(req_url)
         .send()
         .await?
         .json::<serde_json::Value>()
@@ -318,7 +329,7 @@ async fn load_routes() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     direction: bound.to_string(),
                     orig: orig_tc.to_string(),
                     dest: dest_tc.to_string(),
-                }]
+                }],
             );
         }
     });
@@ -417,10 +428,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Eta {
             route,
-            direction,
+            inbound,
+            outbound,
             service_type,
         } => {
-            search_route_eta(&route.to_uppercase(), &direction, service_type).await?;
+            if inbound == outbound {
+                Err("Please set exactly one of `inbound` or `outbound` to `true`")?;
+            }
+
+            let direction = match inbound {
+                true => "inbound",
+                false => {
+                    assert!(outbound);
+                    "outbound"
+                }
+            };
+
+            search_route_eta(&route.to_uppercase(), direction, service_type).await?;
         }
 
         Commands::All => {
