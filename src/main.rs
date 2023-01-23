@@ -74,6 +74,10 @@ impl HKGovAPI {
 }
 
 lazy_static!(
+    // use singleton reqwest client instead of calling reqwest::get(...)
+    // massive performance boost
+    static ref REQWEST_CLIENT: reqwest::Client = reqwest::Client::new();
+
     // key: route, value: vec of route infos
     static ref ROUTES: Mutex<HashMap<String, Vec<RouteInfo>>> = Mutex::new(HashMap::new());
 
@@ -81,12 +85,13 @@ lazy_static!(
     static ref STOP_ID_NAMES: Mutex<HashMap<String, StopIdName>> = Mutex::new(HashMap::new());
 );
 
-async fn load_names() -> Result<(), Box<dyn std::error::Error>> {
+async fn load_names() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let api_url = HKGovAPI::STOP_URL;
 
     let req_url = format!("{}/{}", HKGovAPI::BASE_URL, api_url);
 
-    let body = reqwest::get(req_url)
+    let body = REQWEST_CLIENT.get(req_url)
+        .send()
         .await?
         .json::<serde_json::Value>()
         .await?;
@@ -120,19 +125,45 @@ async fn search_route_eta(
     // make sure route exists
     search_route_info(route, false, Some(direction), Some(service_type)).await?;
 
-    let api_url = HKGovAPI::ROUTE_STOP_URL;
-    let req_url = format!(
-        "{}/{}/{}/{}/{}",
-        HKGovAPI::BASE_URL, api_url, route, direction, service_type
-    );
+    let t_route = route.to_string();
+    let t_direction = direction.to_string();
+    let t_service_type = service_type;
+    let task_route_ids = tokio::spawn(async move {
+        let api_url = HKGovAPI::ROUTE_STOP_URL;
+        let req_url = format!(
+            "{}/{}/{}/{}/{}",
+            HKGovAPI::BASE_URL, api_url, t_route, t_direction, t_service_type
+        );
 
-    let body = reqwest::get(req_url)
-        .await?
-        .json::<serde_json::Value>()
-        .await?;
+        let body = REQWEST_CLIENT.get(req_url)
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
+
+        Ok::<serde_json::Value, Box<dyn std::error::Error + Send + Sync>>(body)
+    });
+
+    let t_route = route.to_string();
+    let t_service_type = service_type;
+    let task_stop_eta = tokio::spawn(async move {
+        let api_url = HKGovAPI::ROUTE_ETA_URL;
+        let req_url = format!("{}/{}/{}/{}", HKGovAPI::BASE_URL, api_url, t_route, t_service_type);
+
+        let body = REQWEST_CLIENT.get(req_url)
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
+
+        Ok::<serde_json::Value, Box<dyn std::error::Error + Send + Sync>>(body)
+    });
+
+    let body_route_ids = task_route_ids.await?.unwrap();
+    let body_stop_eta = task_stop_eta.await?.unwrap();
 
     let route_ids =
-        body["data"]
+        body_route_ids["data"]
             .as_array()
             .unwrap_or(&vec![])
             .iter()
@@ -143,14 +174,6 @@ async fn search_route_eta(
                 cur.push((seq, String::from(stop_id)));
                 cur
             });
-
-    let api_url = HKGovAPI::ROUTE_ETA_URL;
-    let req_url = format!("{}/{}/{}/{}", HKGovAPI::BASE_URL, api_url, route, service_type);
-
-    let body = reqwest::get(req_url)
-        .await?
-        .json::<serde_json::Value>()
-        .await?;
 
     let mut stop_eta = HashMap::new();
     let parse_timestmap =
@@ -168,9 +191,9 @@ async fn search_route_eta(
             ))?
         };
 
-    let api_timestamp = parse_timestmap(&body["generated_timestamp"])?;
+    let api_timestamp = parse_timestmap(&body_stop_eta["generated_timestamp"])?;
 
-    body["data"]
+    body_stop_eta["data"]
         .as_array()
         .unwrap_or(&vec![])
         .iter()
@@ -252,11 +275,12 @@ async fn search_route_eta(
     Ok(())
 }
 
-async fn load_routes() -> Result<(), Box<dyn std::error::Error>> {
+async fn load_routes() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let api_url = HKGovAPI::ROUTE_URL;
     let req_url = format!("{}/{}", HKGovAPI::BASE_URL, api_url,);
 
-    let body = reqwest::get(req_url)
+    let body = REQWEST_CLIENT.get(req_url)
+        .send()
         .await?
         .json::<serde_json::Value>()
         .await?;
@@ -371,8 +395,18 @@ fn search_all_route_info() {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    load_names().await?;
-    load_routes().await?;
+    let task_load_names = tokio::spawn(async move {
+        load_names().await?;
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    });
+
+    let task_load_routes = tokio::spawn(async move {
+        load_routes().await?;
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    });
+
+    task_load_names.await?.expect("failed to load stop names!");
+    task_load_routes.await?.expect("failed to load routes!");
 
     let start = Instant::now();
 
